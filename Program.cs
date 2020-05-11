@@ -1,17 +1,17 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Configuration;
-using System.IO;
-using System.Reflection;
-using NPOI.XSSF.UserModel;
+﻿using NPOI.HSSF.UserModel;
 using NPOI.HSSF.Util;
 using NPOI.SS.UserModel;
 using NPOI.SS.Util;
-using NPOI.HSSF.UserModel;
+using NPOI.XSSF.UserModel;
+using System;
 using System.Collections;
-using System.Text.RegularExpressions;
+using System.Collections.Generic;
+using System.Configuration;
 using System.Diagnostics;
+using System.IO;
+using System.Linq;
+using System.Runtime.ExceptionServices;
+using System.Text.RegularExpressions;
 
 namespace hyperTimeSheet
 {
@@ -21,13 +21,9 @@ namespace hyperTimeSheet
         static int thisYear = DateTime.Now.Year;
         static int thisMonth = 0;
         static string log = null;
-        static readonly string title = $"HyperTimeSheet Ver 2";
-        //static string currentFile = "";
-        static DateTime defaultTime = default; //設定的上班時間
+        static readonly string title = $"HyperTimeSheet Ver 2.1";
         static presenceModel presenceModel = null;
         static absenceModel absenceModel = null;
-        static List<exceptionCaseModel> exceptionCases = null;
-        static List<ResultModel> Results = null;
 
         static void Main(string[] args)
         {
@@ -37,7 +33,7 @@ namespace hyperTimeSheet
             try
             {
                 ini_Log();
-
+                Log(LogMessagesType.info, $"{string.Empty.PadLeft(10, '-')} Process Started {string.Empty.PadRight(10, '-')}");
                 Console.Write("輸入月份:");
                 string tmp = Console.ReadLine();
                 while (!int.TryParse(tmp, out thisMonth) || (thisMonth > 12 || thisMonth < 1))
@@ -52,27 +48,22 @@ namespace hyperTimeSheet
                 //初使化請假明細物件
                 absenceModel = new absenceModel(thisMonth);
                 //初使化例外列表
-                presenceModel.exceptionCases = exceptionCases = GetExceptionCase();
-                //初使化結果列表
-                //Results = new List<ResultModel>();
-                //初使化預設上班時間
-                string time = ConfigurationManager.AppSettings["defaultClockInTime"];
-                defaultTime = default(DateTime).Add(DateTime.Parse(time).TimeOfDay);
+                presenceModel.ExceptionCases = GetExceptionCase();
             }
             catch (Exception e)
             {
                 Console.BackgroundColor = ConsoleColor.White;
                 Console.ForegroundColor = ConsoleColor.DarkRed;
                 Console.WriteLine("糟了！程式被你弄壞了！");
-                Log(LogMessagesType.error, $"初使化發生錯誤。{e.Message}", e.LineNumber(), MethodBase.GetCurrentMethod().Name);
                 Console.ResetColor();
+                Log(LogMessagesType.error, $"初使化發生錯誤。{e.GetFullStackTracesString()}"); 
             }
             #endregion
 
             try
             {
                 absenceModel = GetAbsenceModel(absenceModel);
-                presenceModel = GetPresenceModel(presenceModel);
+                presenceModel = GetPresenceModel(presenceModel, absenceModel);
             }
             catch (Exception e)
             {
@@ -80,21 +71,23 @@ namespace hyperTimeSheet
                 Console.ForegroundColor = ConsoleColor.DarkRed;
                 Console.WriteLine("糟了！程式被你弄壞了！");
                 Console.ResetColor();
-                Log(LogMessagesType.error, $"建立物件發生錯誤。{e.Message}", e.LineNumber(), MethodBase.GetCurrentMethod().Name);
+                Log(LogMessagesType.error, $"建立物件發生錯誤。原因：{e.GetFullStackTracesString()}");
             }
 
             try
             {
-                ExportExcel(presenceModel, absenceModel, exceptionCases);
+                ExportExcel(presenceModel);
             }
-            catch
+            catch(Exception e)
             {
                 Console.BackgroundColor = ConsoleColor.White;
                 Console.ForegroundColor = ConsoleColor.DarkRed;
                 Console.WriteLine("糟了！程式被你弄壞了！");
                 Console.ResetColor();
+                Log(LogMessagesType.error, $"匯出Excel發生錯誤。原因：{e.GetFullStackTracesString()}");
             }
 
+            Log(LogMessagesType.info, $"{string.Empty.PadLeft(10, '-')} Process Completed {string.Empty.PadRight(10, '-')}");
             Console.ResetColor();
             Console.Write(@"檢查完成，請按""Enter""關閉程式...");
             Console.ReadLine();
@@ -126,20 +119,20 @@ namespace hyperTimeSheet
         /// <param name="logMessage"></param>
         /// <param name="errorLineNumber"></param>
         /// <param name="inMethod"></param>
-        private static void Log(LogMessagesType type, string logMessage, int errorLineNumber, string inMethod)
+        private static void Log(LogMessagesType type, string logMessage, ExceptionHelper.StackTraceModel stackTrace = null)
         {
             if (string.IsNullOrEmpty(log))
             {
                 throw new Exception("Log物件尚未初使化");
             }
             StreamWriter sw = File.AppendText(log);
-            if (type == LogMessagesType.error)
+            if (stackTrace != null)
             {
-                sw.WriteLine($"{DateTime.Now.ToString("yyyy-MM-dd  hh:mm:ss")} | {type} on line:{errorLineNumber} at {inMethod} | {logMessage.Replace('\r', ' ')}");
+                sw.WriteLine($"{DateTime.Now:yyyy-MM-dd  hh:mm:ss} | {type} at {stackTrace?.namespace_}.{stackTrace?.method} in {stackTrace?.fileName}:Line {stackTrace?.line} | {logMessage.Replace('\r', ' ')}");
             }
             else
             {
-                sw.WriteLine($"{DateTime.Now.ToString("yyyy-MM-dd  hh:mm:ss")} | {type} | {logMessage.Replace('\r', ' ')}");
+                sw.WriteLine($"{DateTime.Now:yyyy-MM-dd  hh:mm:ss} | {type} | {logMessage.Replace('\r', ' ')}");
             }
             sw.Close();
         }
@@ -154,14 +147,18 @@ namespace hyperTimeSheet
         {
             List<exceptionCaseModel> list = new List<exceptionCaseModel>();
             string filePath = $@"{root}\exceptionCase.txt";
-            string line = string.Empty;
-            try
+            StreamReader stream = new StreamReader(filePath);
+            string line;
+            while ((line = stream.ReadLine()) != null)
             {
-                StreamReader stream = new StreamReader(filePath);
-                while ((line = stream.ReadLine()) != null)
+                try
                 {
+                    line = line.Trim();
+                    if (line.StartsWith("#"))
+                    {
+                        continue;
+                    }
                     string[] tmp = line.Split(',');
-                    DateTime time = default;
                     //Ex: 0001,9:30
                     //Ex: 0001,0005,0009,9:00
                     if (tmp.Length < 2)
@@ -169,7 +166,7 @@ namespace hyperTimeSheet
                         throw new Exception("Exception case 格式有誤");
                     }
 
-                    if (!DateTime.TryParse(tmp[tmp.Length - 1], out time))
+                    if (!DateTime.TryParse(tmp[tmp.Length - 1], out DateTime time))
                     {
                         throw new Exception($"{tmp[tmp.Length - 1]} 無法轉換時間");
                     }
@@ -180,10 +177,13 @@ namespace hyperTimeSheet
                         list.Add(new exceptionCaseModel(tmp[i], default(DateTime).Add(time.TimeOfDay)));
                     }
                 }
-            }
-            catch (Exception e)
-            {
-                Log(LogMessagesType.error, $"讀取Exception Case發生錯誤，已略過讀取\"{line}\"。原因：{e.Message}", e.LineNumber(), MethodBase.GetCurrentMethod().Name);
+                catch (Exception e)
+                {
+                    string message = $"\"{line}\"已略過讀取。原因：";
+                    Log(LogMessagesType.error, $"{message}{e.GetFullStackTracesString()}");
+                    Console.SetCursorPosition(0, Console.CursorTop);
+                    Console.WriteLine($"{message}{e.Message}");
+                }
             }
 
             return list;
@@ -203,10 +203,9 @@ namespace hyperTimeSheet
             {
                 List<string> exts = model.FileExts;
                 List<string> formats = model.FileFormats;
-                List<string> files = Directory.GetFiles(absenceModel.path).ToList();
+                List<string> files = Directory.GetFiles(absenceModel.Path).ToList();
 
                 string fileNamePattern = model.FileRegex;
-                //List<absenceModel.DateInfo> dates = new List<absenceModel.DateInfo>();
                 int current = 1;
                 int count = files.Count;
                 foreach (var file in files)
@@ -248,9 +247,9 @@ namespace hyperTimeSheet
                             string day2 = match.Groups[num_day2].ToString();
 
                             #region 處理月份不等於當月，則跳過
-                            if (model.month != m || thisYear != y)
+                            if (model.Month != m || thisYear != y)
                             {
-                                Log(LogMessagesType.info, $"{currentFile}不屬於{thisYear}.{model.month}月，已略過讀取。", 0, "");
+                                Log(LogMessagesType.info, $"{currentFile}不屬於{thisYear}.{model.Month}月，已略過讀取。");
                                 continue;
                             }
                             #endregion
@@ -285,25 +284,29 @@ namespace hyperTimeSheet
 
                             foreach (var date in absenceDates)
                             {
-                                absenceModel.DateInfo dateinfo = model.Dates.SingleOrDefault(x => x.date == date);
-                                if (dateinfo == null)
+                                absenceModel.Employee employee = model.Employees.SingleOrDefault(x => x.No == No);
+                                //absenceModel.DateInfo dateinfo = model.Dates.SingleOrDefault(x => x.date == date);
+                                if (employee == null)
                                 {
-                                    //model中若沒有 date => 新增
-                                    dateinfo = new absenceModel.DateInfo { date = date };
-                                    dateinfo.employees.Add(new absenceModel.employee { No = No, ename = name, hours = hours });
-                                    model.Dates.Add(dateinfo);
+                                    //model中若沒有 employee => 新增
+                                    employee = new absenceModel.Employee { No = No, Ename = name };
+                                    employee.Dates.Add(new absenceModel.DateInfo { Date = date, Hours = hours });
+                                    model.Employees.Add(employee);
                                 }
                                 else
                                 {
-                                    dateinfo.employees.Add(new absenceModel.employee { No = No, ename = name, hours = hours });
+                                    employee.Dates.Add(new absenceModel.DateInfo { Date = date, Hours = hours });
                                 }
                             }
                         }
                     }
                     catch (Exception e)
                     {
-                        Log(LogMessagesType.error, $"讀取假單發生錯誤，已略過讀取{currentFile}。原因：{e.Message}", e.LineNumber(), MethodBase.GetCurrentMethod().Name);
-                        Console.WriteLine($"讀取假單發生錯誤，已略過讀取{currentFile}。原因：{e.Message}");
+                        //僅略過，不中斷
+                        string message = $"讀取假單發生錯誤，已略過讀取{currentFile}。原因：";
+                        Log(LogMessagesType.error, $"{message}{e.GetFullStackTracesString()}");
+                        Console.SetCursorPosition(0, Console.CursorTop);
+                        Console.WriteLine($"{message}{e.Message}");
                     }
                     finally
                     {
@@ -314,8 +317,7 @@ namespace hyperTimeSheet
             }
             catch (Exception e)
             {
-                Log(LogMessagesType.error, $"讀取假單發生嚴重錯誤，已終止讀取。原因：{e.Message}", e.LineNumber(), MethodBase.GetCurrentMethod().Name);
-                throw;
+                ExceptionDispatchInfo.Capture(e.InnerException ?? e).Throw();
             }
             return model;
         }
@@ -325,19 +327,19 @@ namespace hyperTimeSheet
         /// <summary>
         /// 讀取指定路徑TimeSheet(xls|xlsx)，並回傳presenceModel
         /// </summary>
-        /// <param name="model"></param>
+        /// <param name="presence"></param>
         /// <returns></returns>
-        private static presenceModel GetPresenceModel(presenceModel model)
+        private static presenceModel GetPresenceModel(presenceModel presence, absenceModel absence)
         {
             string currentFile = "";
             try
             {
                 #region 讀取Excel
                 List<string> exts = presenceModel.FileExts;
-                List<string> formats = model.FileFormats;
-                List<string> files = Directory.GetFiles(presenceModel.path).ToList();
+                List<string> formats = presence.FileFormats;
+                List<string> files = Directory.GetFiles(presenceModel.Path).ToList();
 
-                string fileNamePattern = model.FileRegex;
+                string fileNamePattern = presence.FileRegex;
                 int current = 1;
                 int count = files.Count();
                 foreach (var file in files)
@@ -374,7 +376,7 @@ namespace hyperTimeSheet
                                 if (ext == ".xls") { book = new HSSFWorkbook(stream); }
                                 else if (ext == ".xlsx") { book = new XSSFWorkbook(stream); }
                             }
-                            ISheet sheet = book.GetSheet($"{model.month}月份");
+                            ISheet sheet = book.GetSheet($"{presence.Month}月份");
                             
                             #region 若序列名稱找不到sheet(前後有空白)，則逐筆搜尋sheet，比對去空白後的sheet名稱
                             if (sheet == null)
@@ -383,15 +385,21 @@ namespace hyperTimeSheet
                                 while (sheets.MoveNext())
                                 {
                                     ISheet sheet1 = (ISheet)sheets.Current;
-                                    if (sheet1.SheetName.Trim() == $"{model.month}月份")
+                                    if (sheet1.SheetName.Trim() == $"{presence.Month}月份")
                                     {
                                         sheet = sheet1;
                                         break;
                                     }
                                 }
-                            } 
+                            }
                             #endregion
-                            
+
+                            presenceModel.Employee emp = new presenceModel.Employee(No)
+                            {
+                                No = No,
+                                Name = name
+                            };
+
                             IEnumerator rows = sheet.GetRowEnumerator();
                             while (rows.MoveNext())
                             {
@@ -407,16 +415,6 @@ namespace hyperTimeSheet
                                     break;
                                 }
 
-                                //if (row.RowNum == 4)
-                                //{
-                                //    // TimeSheet月份 & 名字
-                                //    //Console.ForegroundColor = ConsoleColor.Yellow;
-                                //    //Console.WriteLine("".PadLeft(30, '='));
-                                //    //Console.WriteLine(row.GetCell(0).ToString());
-                                //    //Console.WriteLine("".PadLeft(30, '='));
-                                //    //Console.ResetColor();
-                                //}
-
                                 if (row.RowNum >= 8)
                                 {
                                     int colorCode = row.GetCell(0).CellStyle.FillForegroundColor;
@@ -424,36 +422,39 @@ namespace hyperTimeSheet
                                     //0 出勤日期  1 上班  2 下班  3 正常時數  4 加班時數   5 on-site單位  6 說明(假日, 休假, 病假, 事假, 其他)
                                     DateTime date = getValue<DateTime>(row.Cells[0]);
                                     //取得當月所有日期資訊
-                                    presenceModel.DateInfo dateInfo = model.Dates.SingleOrDefault(x => x.date == date);
-                                    if (dateInfo.workingDay)
+                                    //var dateInfo = presenceModel.DateInfos.SingleOrDefault(x => x.Date == date);
+                                    var dateInfo = presenceModel.DateInfos.Select(x =>
+                                        {
+                                            return new presenceModel.DateInfo { Date = x.Date, Note = x.Note, Week = x.Week, WorkingDay = x.WorkingDay };
+                                        }
+                                    ).SingleOrDefault(x => x.Date == date);
+                                    var absenceEmp = absence.Employees.SingleOrDefault(x => x.No == No);
+                                    if (dateInfo.WorkingDay)
                                     {
                                         #region columns to model.dates.dateinfo.employee.info
-                                        presenceModel.employee employee = new presenceModel.employee
-                                        {
-                                            No = No,
-                                            name = name,
-                                            infos = new presenceModel.info
-                                            {
-                                                clockin = getValue<DateTime>(row.Cells[1]),
-                                                clockout = getValue<DateTime>(row.Cells[2]),
-                                                hours = getValue<double>(row.Cells[3]),
-                                                overtime = getValue<double>(row.Cells[4]),
-                                                onsite = getValue<string>(row.Cells[5]),
-                                                note = getValue<string>(row.Cells[6])
-                                            }
-                                        };
+                                        dateInfo.Infos.Clockin = getValue<DateTime>(row.Cells[1]);
+                                        dateInfo.Infos.Clockout = getValue<DateTime>(row.Cells[2]);
+                                        dateInfo.Infos.Hours = getValue<double>(row.Cells[3]);
+                                        dateInfo.Infos.Overtime = getValue<double>(row.Cells[4]);
+                                        dateInfo.Infos.Onsite = getValue<string>(row.Cells[5]);
+                                        dateInfo.Infos.Note = getValue<string>(row.Cells[6]);
+                                        dateInfo.Infos.AbsenceHours = absenceEmp?.Dates.SingleOrDefault(x => x.Date == date)?.Hours ?? 0;
 
-                                        dateInfo.employees.Add(employee);
+                                        emp.Dates.Add(dateInfo);
                                         #endregion
                                     }
                                 }
                             }
+                            presence.Employees.Add(emp);
                         }
                     }
                     catch (Exception e)
                     {
-                        Log(LogMessagesType.error, $"讀取TimeSheet發生錯誤，已略過讀取{currentFile}。原因：{e.Message}", e.LineNumber(), MethodBase.GetCurrentMethod().Name);
-                        Console.WriteLine($"讀取TimeSheet發生錯誤，已略過讀取{currentFile}。原因：{e.Message}");
+                        //僅略過，不中斷
+                        string message = $"讀取TimeSheet發生錯誤，已略過讀取{currentFile}。原因：";
+                        Log(LogMessagesType.error, $"{message}{e.GetFullStackTracesString()}");
+                        Console.SetCursorPosition(0, Console.CursorTop);
+                        Console.WriteLine($"{message}{e.Message}");
                     }
                     finally
                     {
@@ -465,10 +466,9 @@ namespace hyperTimeSheet
             }
             catch (Exception e)
             {
-                Log(LogMessagesType.error, $"讀取TimeSheet發生嚴重錯誤，已終止讀取。原因：{e.Message}", e.LineNumber(), MethodBase.GetCurrentMethod().Name);
-                throw;
+                ExceptionDispatchInfo.Capture(e.InnerException ?? e).Throw();
             }
-            return model;
+            return presence;
 
             #region 取cell值(指定型別)
             dynamic getValue<T>(ICell cell)
@@ -562,27 +562,6 @@ namespace hyperTimeSheet
         }
         #endregion
 
-        #region 檢查上班時間
-        /// <summary>
-        /// 檢查emp的上班時間，若emp在例外清單中，則以例外清單所設定的時間為準，否則以預設時間設定。回傳是否準時
-        /// </summary>
-        /// <param name="emp"></param>
-        /// <returns></returns>
-        private static bool checkClockInTime(presenceModel.employee emp)
-        {
-            bool inTime = false;
-
-            if (exceptionCases != null)
-            {
-                var ecp = exceptionCases.SingleOrDefault(x => x.No == emp.No);
-                DateTime time = ecp == null ? defaultTime : ecp.specifiedClockIn;
-                inTime = emp.infos.clockin.CompareTo(time) <= 0; //實際打卡時間小於等於設定時間 = 準時
-            }
-
-            return inTime;
-        } 
-        #endregion
-
         #region console進度
         /// <summary>
         /// (message)... x/y 
@@ -623,18 +602,17 @@ namespace hyperTimeSheet
         #endregion
 
         #region 匯出EXCEL
-
         /// <summary>
         /// 匯出至EXCEL
         /// </summary>
-        private static void ExportExcel(presenceModel presence, absenceModel absence, List<exceptionCaseModel> exceptions)
+        private static void ExportExcel(presenceModel presence)
         {
             var wb = new XSSFWorkbook();
             ISheet sheetResult = wb.CreateSheet("測試輸出結果");
             sheetResult.SetColumnWidth(0, 15 * 256);
             for (int i = 1; i <= 3; i++)
             {
-                sheetResult.SetColumnWidth(i, 30 * 256);
+                sheetResult.SetColumnWidth(i, 40 * 256);
             }
             sheetResult.CreateFreezePane(0, 1);
             ISheet sheetArrange = wb.CreateSheet("出勤一覽");
@@ -643,7 +621,9 @@ namespace hyperTimeSheet
 
             try
             {
-                #region 粗底細邊(左右)+底色
+                #region 出勤一覽
+                IRow firstRow = sheetArrange.CreateRow(0);
+                #region 格式(粗底細邊(左右)+底色)
                 XSSFCellStyle firstRowStyle = (XSSFCellStyle)wb.CreateCellStyle();
                 XSSFColor color = new XSSFColor();
                 color.SetRgb(new byte[] { (byte)136, (byte)160, (byte)226 });
@@ -653,30 +633,31 @@ namespace hyperTimeSheet
                 firstRowStyle.BorderRight = BorderStyle.Thin;
                 firstRowStyle.BorderLeft = BorderStyle.Thin;
                 #endregion
-
-                IRow firstRow = sheetArrange.CreateRow(0);
                 int count = presence.GetWorkingDays();
                 firstRow.CreateCell(0).SetCellValue($"上班日共{count}日");
                 firstRow.GetCell(0).CellStyle = firstRowStyle;
                 int index = 1;
-                foreach (var date in presence.Dates)
+                foreach (var date in presenceModel.DateInfos)
                 {
-                    if (date.workingDay)
+                    if (date.WorkingDay)
                     {
-                        firstRow.CreateCell(index).SetCellValue($"{date.date.ToString("MM-dd")}({date.week})");
+                        firstRow.CreateCell(index).SetCellValue($"{date.Date:MM-dd}({date.Week})");
                         firstRow.GetCell(index).CellStyle = firstRowStyle;
-                        sheetArrange.SetColumnWidth(index, 10 * 256);
-                        foreach (var emp in date.employees.Select((v, i) => new { index = i, value = v }))
-                        {
-                            var absenceEmps = date.GetAbsenceEmploees(absence);
-                            var absenceEmp = emp.value.GetAbsenceEmployee(absenceEmps);
-                            writeEmlpoyeeByDate(sheetArrange, emp.index, index, emp.value, absenceEmp);
-                        }
+                        sheetArrange.SetColumnWidth(index, 11 * 256);
                         proccess($"寫入工作天", index, count);
                         index++;
                     }
                 }
 
+                int empCount = presence.GetEmployees();
+                foreach (var emp in presence.Employees.Select((v, i) => new { index = i, list = v }))
+                {
+                    writeEmlpoyeeByDate(sheetArrange, emp.index, emp.list);
+                    proccess($"寫入員工出勤紀錄", emp.index + 1, empCount);
+                }
+                #endregion
+
+                #region 彙總結果
                 IRow firstRow2 = sheetResult.CreateRow(0);
                 firstRow2.CreateCell(0);
                 firstRow2.CreateCell(1).SetCellValue("出勤");
@@ -686,7 +667,7 @@ namespace hyperTimeSheet
                 {
                     firstRow2.GetCell(i).CellStyle = firstRowStyle;
                 }
-                #region 粗底細邊
+                #region 格式(粗底細邊)
                 XSSFCellStyle RowStyle = (XSSFCellStyle)wb.CreateCellStyle();
                 RowStyle.BorderBottom = BorderStyle.Thick;
                 RowStyle.BorderLeft = BorderStyle.Thin;
@@ -694,20 +675,17 @@ namespace hyperTimeSheet
                 RowStyle.WrapText = true;
                 RowStyle.VerticalAlignment = VerticalAlignment.Center;
                 #endregion
-                var emplist = presenceModel.GetEmployees();
-                int index2 = 1;
-                int count2 = emplist.Count;
-                foreach (var emp in emplist)
+                foreach (var emp in presence.Employees.Select((v, i) => new { index = i, list = v }))
                 {
-                    var result = (GetResult(presenceModel, absenceModel, exceptions, emp.No, emp.name));
-                    IRow row = sheetResult.CreateRow(index2);
+                    var result = GetResult(emp.list);
+                    IRow row = sheetResult.CreateRow(emp.index + 1);
                     row.CreateCell(0).SetCellValue(result.NoAndName);
                     row.CreateCell(1);
                     row.CreateCell(2);
-                    row.CreateCell(3).SetCellValue(result.overtimeMessage == "" ? "無" : result.overtimeMessage);
+                    row.CreateCell(3).SetCellValue(result.OvertimeMessage == "" ? "無" : result.OvertimeMessage);
                     row.GetCell(0).CellStyle = RowStyle;
                     #region 出勤(1) 異常=>紅字
-                    if (result.presenceMessage != "")
+                    if (result.PresenceMessage != "")
                     {
                         XSSFCellStyle presenceRowStyle = (XSSFCellStyle)wb.CreateCellStyle();
                         presenceRowStyle.BorderBottom = BorderStyle.Thick;
@@ -719,17 +697,17 @@ namespace hyperTimeSheet
                         redFont.Color = HSSFColor.Red.Index;
                         redFont.FontHeightInPoints = 11;
                         presenceRowStyle.SetFont(redFont);
-                        row.GetCell(1).SetCellValue(result.presenceMessage);
+                        row.GetCell(1).SetCellValue(result.PresenceMessage);
                         row.GetCell(1).CellStyle = presenceRowStyle;
                     }
                     else
                     {
-                        row.GetCell(1).SetCellValue("正常");
+                        row.GetCell(1).SetCellValue("出勤正常");
                         row.GetCell(1).CellStyle = RowStyle;
                     }
                     #endregion
                     #region 請假(2) =>綠字
-                    if (result.absenceMessage != "")
+                    if (result.AbsenceMessage != "")
                     {
                         XSSFCellStyle absenceRowStyle = (XSSFCellStyle)wb.CreateCellStyle();
                         absenceRowStyle.BorderBottom = BorderStyle.Thick;
@@ -741,7 +719,7 @@ namespace hyperTimeSheet
                         greenFont.Color = HSSFColor.Green.Index;
                         greenFont.FontHeightInPoints = 11;
                         absenceRowStyle.SetFont(greenFont);
-                        row.GetCell(2).SetCellValue(result.absenceMessage);
+                        row.GetCell(2).SetCellValue(result.AbsenceMessage);
                         row.GetCell(2).CellStyle = absenceRowStyle;
                     }
                     else
@@ -751,9 +729,9 @@ namespace hyperTimeSheet
                     }
                     #endregion
                     row.GetCell(3).CellStyle = RowStyle;
-                    proccess("輸出彙整結果", index2, count2);
-                    index2++;
+                    proccess("輸出彙整結果", emp.index + 1, empCount);
                 }
+                #endregion
 
                 var fs = new FileStream($"{thisYear}.{thisMonth}.xlsx", FileMode.Create);
                 wb.Write(fs);
@@ -761,332 +739,304 @@ namespace hyperTimeSheet
             }
             catch (Exception e)
             {
-                Log(LogMessagesType.error, $"匯出excel時發生錯誤。原因：{e.Message}", e.LineNumber(), MethodBase.GetCurrentMethod().Name);
-                throw;
+                ExceptionDispatchInfo.Capture(e.InnerException ?? e).Throw();
             }
 
-            #region 寫入員工資料
-            void writeEmlpoyeeByDate(ISheet sheet, int index, int dateCol, presenceModel.employee emp, absenceModel.employee aEmp)
+            #region 寫入員工資料(void)
+            void writeEmlpoyeeByDate(ISheet sheet, int index, presenceModel.Employee employee)
             {
-                #region 員工資料格式
-                XSSFCellStyle empStyle = (XSSFCellStyle)wb.CreateCellStyle();
-                empStyle.BorderBottom = BorderStyle.Thick;
-                empStyle.BorderRight = BorderStyle.Thin;
-                empStyle.BorderLeft = BorderStyle.Thin;
-                #endregion
-                #region 打卡資訊格式
-                XSSFCellStyle infoStyle = (XSSFCellStyle)wb.CreateCellStyle();
-                infoStyle.BorderBottom = BorderStyle.Thin;
-                infoStyle.BorderRight = BorderStyle.Thin;
-                infoStyle.BorderLeft = BorderStyle.Thin;
-                #endregion
-                #region 打卡資訊第一列
-                XSSFCellStyle firstRowStyle = (XSSFCellStyle)wb.CreateCellStyle();
-                firstRowStyle.BorderBottom = BorderStyle.Thin;
-                firstRowStyle.BorderLeft = BorderStyle.Thin;
-                firstRowStyle.BorderRight = BorderStyle.Thin;
-                if (!emp.CheckClockInTime(exceptionCases))
-                {
-                    //超過時間打卡 => 上班時間設定紅字
-                    XSSFFont redFont = (XSSFFont)wb.CreateFont();
-                    redFont.Color = HSSFColor.Red.Index;
-                    redFont.FontHeightInPoints = 11;
-                    firstRowStyle.SetFont(redFont);
-                }
-                #endregion
-                #region 打卡資訊最後一列
-                XSSFCellStyle lastRowStyle = (XSSFCellStyle)wb.CreateCellStyle();
-                lastRowStyle.BorderBottom = BorderStyle.Thick;
-                lastRowStyle.BorderLeft = BorderStyle.Thin;
-                lastRowStyle.BorderRight = BorderStyle.Thin;
-                lastRowStyle.WrapText = true;
-                lastRowStyle.Alignment = HorizontalAlignment.Left;
-                lastRowStyle.VerticalAlignment = VerticalAlignment.Top;
-                #endregion
-
-                #region 醒目底色
-                if (index % 2 == 0)
-                {
-                    XSSFColor color = new XSSFColor();
-                    color.SetRgb(new byte[] { (byte)230, (byte)230, (byte)230 });
-                    empStyle.FillForegroundColorColor = color;
-                    empStyle.FillPattern = FillPattern.SolidForeground;
-                    infoStyle.FillForegroundColorColor = color;
-                    infoStyle.FillPattern = FillPattern.SolidForeground;
-                    firstRowStyle.FillForegroundColorColor = color;
-                    firstRowStyle.FillPattern = FillPattern.SolidForeground;
-                    lastRowStyle.FillForegroundColorColor = color;
-                    lastRowStyle.FillPattern = FillPattern.SolidForeground;
-                }
-                #endregion
-
-                #region 請假資訊
-                int absenceHours = 0; //請假時數
-                string absenceHoursStr = "";
-                if (aEmp != null)
-                {
-                    //表示該員工有請假資訊
-                    absenceHours = (int)aEmp.hours;
-                    absenceHoursStr = $"\n({aEmp.hours})";
-                    XSSFColor color = new XSSFColor();
-                    color.SetRgb(new byte[] { (byte)147, (byte)255, (byte)147 });
-                    infoStyle.FillForegroundColorColor = color;
-                    infoStyle.FillPattern = FillPattern.SolidForeground;
-                    firstRowStyle.FillForegroundColorColor = color;
-                    firstRowStyle.FillPattern = FillPattern.SolidForeground;
-                    lastRowStyle.FillForegroundColorColor = color;
-                    lastRowStyle.FillPattern = FillPattern.SolidForeground;
-                }
-                #endregion
-
-                #region 出勤異常加粉紅底色
-                if (absenceHours < 8 && (emp.infos.clockin == DateTime.MinValue || emp.infos.clockout == DateTime.MinValue || (emp.infos.hours < 8 - absenceHours)))
-                {
-                    XSSFColor color = new XSSFColor();
-                    color.SetRgb(new byte[] { (byte)255, (byte)147, (byte)147 });
-                    infoStyle.FillForegroundColorColor = color;
-                    infoStyle.FillPattern = FillPattern.SolidForeground;
-                    firstRowStyle.FillForegroundColorColor = color;
-                    firstRowStyle.FillPattern = FillPattern.SolidForeground;
-                    lastRowStyle.FillForegroundColorColor = color;
-                    lastRowStyle.FillPattern = FillPattern.SolidForeground;
-                }
-                #endregion
-
                 //每個人皆5列
                 int rowspan = 5;
-                try
+                int colnumber = 1;
+                foreach (var dateInfo in employee.Dates)
                 {
+                    bool IsFirst = dateInfo.Equals(employee.Dates.First());
+                    bool IsNormal = !(dateInfo.Infos.AbsenceHours < 8 && (dateInfo.Infos.Clockin == default || dateInfo.Infos.Clockout == default || (dateInfo.Infos.Hours < 8 - dateInfo.Infos.AbsenceHours)));
+                    bool IsAbsent = dateInfo.Infos.AbsenceHours > 0;
+                    #region 員工資料格式
+                    XSSFCellStyle empStyle = (XSSFCellStyle)wb.CreateCellStyle();
+                    empStyle.BorderBottom = BorderStyle.Thick;
+                    empStyle.BorderRight = BorderStyle.Thin;
+                    empStyle.BorderLeft = BorderStyle.Thin;
+                    empStyle.VerticalAlignment = VerticalAlignment.Center;
+                    empStyle.WrapText = true;
+                    #endregion
+                    #region 出勤資訊格式
+                    XSSFCellStyle infoStyle = (XSSFCellStyle)wb.CreateCellStyle();
+                    infoStyle.BorderBottom = BorderStyle.Thin;
+                    infoStyle.BorderRight = BorderStyle.Thin;
+                    infoStyle.BorderLeft = BorderStyle.Thin;
+                    infoStyle.Alignment = HorizontalAlignment.Left;
+                    #endregion
+                    #region 出勤資訊第一列
+                    XSSFCellStyle firstRowStyle = (XSSFCellStyle)wb.CreateCellStyle();
+                    firstRowStyle.BorderBottom = BorderStyle.Thin;
+                    firstRowStyle.BorderLeft = BorderStyle.Thin;
+                    firstRowStyle.BorderRight = BorderStyle.Thin;
+                    #endregion
+                    #region 出勤資訊最後一列
+                    XSSFCellStyle lastRowStyle = (XSSFCellStyle)wb.CreateCellStyle();
+                    lastRowStyle.BorderBottom = BorderStyle.Thick;
+                    lastRowStyle.BorderLeft = BorderStyle.Thin;
+                    lastRowStyle.BorderRight = BorderStyle.Thin;
+                    lastRowStyle.WrapText = true;
+                    lastRowStyle.Alignment = HorizontalAlignment.Left;
+                    lastRowStyle.VerticalAlignment = VerticalAlignment.Top;
+                    #endregion
+
+                    #region 醒目底色
+                    if (index % 2 == 0)
+                    {
+                        XSSFColor color = new XSSFColor();
+                        color.SetRgb(new byte[] { (byte)230, (byte)230, (byte)230 });
+                        empStyle.FillForegroundColorColor = color;
+                        empStyle.FillPattern = FillPattern.SolidForeground;
+                        infoStyle.FillForegroundColorColor = color;
+                        infoStyle.FillPattern = FillPattern.SolidForeground;
+                        firstRowStyle.FillForegroundColorColor = color;
+                        firstRowStyle.FillPattern = FillPattern.SolidForeground;
+                        lastRowStyle.FillForegroundColorColor = color;
+                        lastRowStyle.FillPattern = FillPattern.SolidForeground;
+                    }
+                    #endregion
+
+                    if (!employee.CheckClockInTime(dateInfo))
+                    {
+                        //判斷是否遲到
+                        #region 遲到加紅字
+                        XSSFFont redFont = (XSSFFont)wb.CreateFont();
+                        redFont.Color = HSSFColor.Red.Index;
+                        redFont.FontHeightInPoints = 11;
+                        firstRowStyle.SetFont(redFont);
+                        #endregion
+                    }
+
+                    if (IsAbsent && IsNormal)
+                    {
+                        //有請假
+                        #region 請假加亮綠底色
+                        XSSFColor color = new XSSFColor();
+                        color.SetRgb(new byte[] { (byte)147, (byte)255, (byte)147 });
+                        infoStyle.FillForegroundColorColor = color;
+                        infoStyle.FillPattern = FillPattern.SolidForeground;
+                        firstRowStyle.FillForegroundColorColor = color;
+                        firstRowStyle.FillPattern = FillPattern.SolidForeground;
+                        lastRowStyle.FillForegroundColorColor = color;
+                        lastRowStyle.FillPattern = FillPattern.SolidForeground;
+                        #endregion
+                    }
+                    else if (!IsNormal)
+                    {
+                        //出勤異常
+                        #region 出勤異常加粉紅底色
+                        XSSFColor color = new XSSFColor();
+                        color.SetRgb(new byte[] { (byte)255, (byte)147, (byte)147 });
+                        infoStyle.FillForegroundColorColor = color;
+                        infoStyle.FillPattern = FillPattern.SolidForeground;
+                        firstRowStyle.FillForegroundColorColor = color;
+                        firstRowStyle.FillPattern = FillPattern.SolidForeground;
+                        lastRowStyle.FillForegroundColorColor = color;
+                        lastRowStyle.FillPattern = FillPattern.SolidForeground;
+                        #endregion
+                    }
+
                     for (int i = 1; i <= rowspan; i++)
                     {
                         //每人跨列的列數 * 第？個人 + 該人第幾列
                         int r = rowspan * index + i;
-                        IRow row = sheet.GetRow(r) == null ? sheet.CreateRow(r) : sheet.GetRow(r);
+                        IRow row = sheet.GetRow(r) ?? sheet.CreateRow(r);
 
-                        #region 寫入第一個日期的打卡資料時，同時在第一欄cell(0)寫入員編&名字
-                        if (dateCol == 1)
+                        #region 第一欄cell(0)寫入員編&名字
+                        if (IsFirst)
                         {
-                            empStyle.VerticalAlignment = VerticalAlignment.Center;
-                            empStyle.WrapText = true;
-                            var exception = exceptionCases.SingleOrDefault(x => x.No == emp.No);
-                            string addition = exception == null ? "" : $"({exception.specifiedClockIn.ToString("HH:mm")})";
+                            string SpecifiedClockInTime = employee.SpecifiedClockInTime == default ? "" : $"\r({employee.SpecifiedClockInTime:HH:mm})";
                             switch (i)
                             {
                                 case 1:
-                                    row.CreateCell(0).SetCellValue($"{emp.No}-{emp.name}\r{addition}");
+                                    row.CreateCell(0).SetCellValue($"{employee.No}-{employee.Name}{SpecifiedClockInTime}");
                                     sheet.AddMergedRegion(new CellRangeAddress(rowspan * index + 1, rowspan * index + 5, 0, 0));
                                     row.GetCell(0).CellStyle = empStyle;
                                     break;
                                 default:
-                                    // 2~4
+                                    // 2~5
                                     row.CreateCell(0).CellStyle = empStyle;
                                     break;
-                                case 5:
-                                    //每人最後一列
-                                    row.CreateCell(0).CellStyle = empStyle;
-                                    break;
+                                    //case 5:
+                                    //    //每人最後一列
+                                    //    row.CreateCell(0).CellStyle = empStyle;
+                                    //    break;
                             }
                         }
                         #endregion
 
-                        #region 寫入當天打卡資料
+                        #region 寫入各工作天出勤資料
                         switch (i)
                         {
                             case 1:
-                                row.CreateCell(dateCol).SetCellValue(DateTime.MinValue == emp.infos.clockin ? "" : emp.infos.clockin.ToString("HH:mm"));
-                                row.GetCell(dateCol).CellStyle = firstRowStyle;
+                                row.CreateCell(colnumber).SetCellValue(dateInfo.Infos.Clockin == default ? "" : $"{dateInfo.Infos.Clockin:HH:mm}");
+                                row.GetCell(colnumber).CellStyle = firstRowStyle;
                                 break;
                             case 2:
-                                row.CreateCell(dateCol).SetCellValue(DateTime.MinValue == emp.infos.clockout ? "" : emp.infos.clockout.ToString("HH:mm"));
-                                row.GetCell(dateCol).CellStyle = infoStyle;
+                                row.CreateCell(colnumber).SetCellValue(dateInfo.Infos.Clockout == default ? "" : $"{dateInfo.Infos.Clockout:HH:mm}");
+                                row.GetCell(colnumber).CellStyle = infoStyle;
                                 break;
                             case 3:
-                                row.CreateCell(dateCol).SetCellValue(emp.infos.hours);
-                                row.GetCell(dateCol).SetCellType(CellType.String);
-                                row.GetCell(dateCol).CellStyle = infoStyle;
+                                row.CreateCell(colnumber).SetCellValue(dateInfo.Infos.Hours);
+                                //row.GetCell(colnumber).SetCellType(CellType.String);
+                                row.GetCell(colnumber).CellStyle = infoStyle;
                                 break;
                             case 4:
-                                row.CreateCell(dateCol).SetCellValue(emp.infos.onsite);
-                                row.GetCell(dateCol).CellStyle = infoStyle;
+                                row.CreateCell(colnumber).SetCellValue(dateInfo.Infos.Onsite);
+                                row.GetCell(colnumber).CellStyle = infoStyle;
                                 break;
                             case 5:
-                                row.CreateCell(dateCol).SetCellValue($"{emp.infos.note}{absenceHoursStr}");
-                                row.GetCell(dateCol).CellStyle = lastRowStyle;
+                                string absenceString = dateInfo.Infos.AbsenceHours == 0 ? "" : $"\n(請假:{dateInfo.Infos.AbsenceHours})";
+                                row.CreateCell(colnumber).SetCellValue($"{dateInfo.Infos.Note}{absenceString}");
+                                row.GetCell(colnumber).CellStyle = lastRowStyle;
                                 break;
                         }
                         #endregion
                     }
-                }
-                catch (Exception e)
-                {
-                    Log(LogMessagesType.error, $"寫入employee時發生錯誤。原因：{e.Message}", e.LineNumber(), MethodBase.GetCurrentMethod().Name);
-                    throw;
+                    colnumber++;
                 }
             }
             #endregion
 
-            #region 彙整員工當月出勤結果
-            ResultModel GetResult(presenceModel presenceModel, absenceModel absenceModel, List<exceptionCaseModel> exceptionCases, string no, string name)
+            #region 彙整員工當月出勤結果(void)
+            ResultModel GetResult(presenceModel.Employee employee)
             {
-                //取得該員工當月所有出勤資料
-                var res = presenceModel.Dates.SelectMany(
-                    x => x.employees,
-                    (d, e) => new
-                    {
-                        d.date,
-                        dateStr = $"{d.date.ToString("MM/dd")}({d.week})",
-                        employee = e
-                    }
-                ).Where(x => x.employee.No == no).Select(
-                    x => new
-                    {
-                        x.date,
-                        x.dateStr,
-                        x.employee
-                    }
-                );
-
-                //取得該員工當月所有請假資料
-                var absenceRes = absenceModel.Dates.SelectMany(
-                    x => x.employees,
-                    (d, e) => new
-                    {
-                        d.date,
-                        employee = e
-                    }
-                ).Where(x => x.employee.No == no).Select(
-                    x => new
-                    {
-                        x.date,
-                        x.employee.hours
-                    }
-                );
-                var exception = exceptionCases.SingleOrDefault(x => x.No == no);
-                var Result = new ResultModel();
-                Result.NoAndName = exception == null ? $"{no}-{name}" : $"{no}-{name}\n({exception.specifiedClockIn.ToString("HH:mm")})";
-                var tmp = new Dictionary<string, List<string>>();
-                //Key：presence、absence、overtime
-                //處理單一員工當月每個工作天
-                foreach (var item in res)
+                if (employee != null)
                 {
-                    //取得當天請假時數
-                    var ab = absenceRes.SingleOrDefault(x => x.date == item.date);
-                    int absenceHours = ab == null ? 0 : (int)ab.hours;
-                    #region 出勤
-                    if (absenceHours >= 8)
+                    var Result = new ResultModel
                     {
-                        //請假時數大於等於8 => 請全天不處理
-                    }
-                    else if (item.employee.infos.clockin == DateTime.MinValue && item.employee.infos.clockout == DateTime.MinValue)
+                        NoAndName = employee.SpecifiedClockInTime == default ? $"{employee.No}-{employee.Name}" : $"{employee.No}-{employee.Name}\n({employee.SpecifiedClockInTime:HH:mm})"
+                    };
+                    var tmp = new Dictionary<string, List<string>>();
+                    //Key：presence、absence、overtime
+                    //處理單一員工當月每個工作天
+                    foreach (var dateInfo in employee.Dates)
                     {
-                        //無上班 & 下班紀錄 (未請假)
-                        string m = $"{item.dateStr} 未請假";
-                        if (tmp.ContainsKey("presence"))
-                        {
-                            tmp["presence"].Add(m);
-                        }
-                        else
-                        {
-                            tmp.Add("presence", new List<string> { m });
-                        }
-                    }
-                    else if (item.employee.infos.clockin > DateTime.MinValue && item.employee.infos.clockout > DateTime.MinValue && item.employee.infos.hours < (8 - absenceHours))
-                    {
-                        //時數未滿 ( 8 - 當天請假時數 ) 
-                        //檢查是否遲到
-                        string late = item.employee.CheckClockInTime(exceptionCases) ? "" : "遲到、";
-                        string m = $"{item.dateStr} {late}時數未滿 {8 - absenceHours} 小時";
-                        if (tmp.ContainsKey("presence"))
-                        {
-                            tmp["presence"].Add(m);
-                        }
-                        else
-                        {
-                            tmp.Add("presence", new List<string> { m });
-                        }
-                    }
-                    else if (item.employee.infos.clockin == DateTime.MinValue)
-                    {
-                        //無上班紀錄
-                        string m = $"{item.dateStr} 無上班紀錄";
-                        if (tmp.ContainsKey("presence"))
-                        {
-                            tmp["presence"].Add(m);
-                        }
-                        else
-                        {
-                            tmp.Add("presence", new List<string> { m });
-                        }
-                    }
-                    else if (item.employee.infos.clockout == DateTime.MinValue)
-                    {
-                        //無下班紀錄
-                        //檢查是否遲到
-                        string late = item.employee.CheckClockInTime(exceptionCases) ? "" : "遲到、";
-                        string m = $"{item.dateStr} {late}無下班紀錄";
-                        if (tmp.ContainsKey("presence"))
-                        {
-                            tmp["presence"].Add(m);
-                        }
-                        else
-                        {
-                            tmp.Add("presence", new List<string> { m });
-                        }
-                    }
-                    else if (!item.employee.CheckClockInTime(exceptionCases))
-                    {
-                        string m = $"{item.dateStr} 遲到";
-                        if (tmp.ContainsKey("presence"))
-                        {
-                            tmp["presence"].Add(m);
-                        }
-                        else
-                        {
-                            tmp.Add("presence", new List<string> { m });
-                        }
-                    }
+                        string DateAndWeek = $"{dateInfo.Date:MM/dd}({dateInfo.Week})";
+                        bool IsInTime = employee.CheckClockInTime(dateInfo);
 
-
-                    #endregion
-
-                    #region 請假
-                    if (absenceHours > 0)
-                    {
-                        string m = $"{item.dateStr} ({absenceHours})";
-                        if (tmp.ContainsKey("absence"))
+                        #region 出勤
+                        if (dateInfo.Infos.AbsenceHours >= 8)
                         {
-                            tmp["absence"].Add(m);
+                            //請假時數大於等於8 => 請全天不處理
                         }
-                        else
+                        else if (dateInfo.Infos.Clockin == default && dateInfo.Infos.Clockout == default)
                         {
-                            tmp.Add("absence", new List<string> { m });
+                            //無上班 & 下班紀錄 (未請假)
+                            string m = $"{DateAndWeek} 未請假";
+                            if (tmp.ContainsKey("presence"))
+                            {
+                                tmp["presence"].Add(m);
+                            }
+                            else
+                            {
+                                tmp.Add("presence", new List<string> { m });
+                            }
                         }
+                        else if (dateInfo.Infos.Clockin > default(DateTime) && dateInfo.Infos.Clockout > default(DateTime) && dateInfo.Infos.Hours < (8 - dateInfo.Infos.AbsenceHours))
+                        {
+                            //時數未滿 ( 8 - 當天請假時數 ) 
+                            //檢查是否遲到
+                            string late = IsInTime ? "" : "遲到、";
+                            string m = $"{DateAndWeek} {late}時數未滿 {8 - dateInfo.Infos.AbsenceHours} 小時";
+                            if (tmp.ContainsKey("presence"))
+                            {
+                                tmp["presence"].Add(m);
+                            }
+                            else
+                            {
+                                tmp.Add("presence", new List<string> { m });
+                            }
+                        }
+                        else if (dateInfo.Infos.Clockin == default)
+                        {
+                            //無上班紀錄
+                            string m = $"{DateAndWeek} 無上班紀錄";
+                            if (tmp.ContainsKey("presence"))
+                            {
+                                tmp["presence"].Add(m);
+                            }
+                            else
+                            {
+                                tmp.Add("presence", new List<string> { m });
+                            }
+                        }
+                        else if (dateInfo.Infos.Clockout == default)
+                        {
+                            //無下班紀錄
+                            //檢查是否遲到
+                            string late = IsInTime ? "" : "遲到、";
+                            string m = $"{DateAndWeek} {late}無下班紀錄";
+                            if (tmp.ContainsKey("presence"))
+                            {
+                                tmp["presence"].Add(m);
+                            }
+                            else
+                            {
+                                tmp.Add("presence", new List<string> { m });
+                            }
+                        }
+                        else if (!IsInTime)
+                        {
+                            string m = $"{DateAndWeek} 遲到";
+                            if (tmp.ContainsKey("presence"))
+                            {
+                                tmp["presence"].Add(m);
+                            }
+                            else
+                            {
+                                tmp.Add("presence", new List<string> { m });
+                            }
+                        }
+                        #endregion
+
+                        #region 請假
+                        if (dateInfo.Infos.AbsenceHours > 0)
+                        {
+                            string m = $"{DateAndWeek} ({dateInfo.Infos.AbsenceHours})";
+                            if (tmp.ContainsKey("absence"))
+                            {
+                                tmp["absence"].Add(m);
+                            }
+                            else
+                            {
+                                tmp.Add("absence", new List<string> { m });
+                            }
+                        }
+                        #endregion
+
+                        #region 加班
+                        if (dateInfo.Infos.Overtime > 0)
+                        {
+                            string m = $"{DateAndWeek} ({dateInfo.Infos.Overtime})";
+                            if (tmp.ContainsKey("overtime"))
+                            {
+                                tmp["overtime"].Add(m);
+                            }
+                            else
+                            {
+                                tmp.Add("overtime", new List<string> { m });
+                            }
+                        }
+                        #endregion
                     }
-                    #endregion
+                    Result.PresenceMessage = tmp.ContainsKey("presence") ? $"{tmp["presence"].Count}天異常\n{string.Join("\n", tmp["presence"])}" : "";
+                    Result.AbsenceMessage = tmp.ContainsKey("absence") ? $"{tmp["absence"].Count}天\n{string.Join("\n", tmp["absence"])}" : "";
+                    Result.OvertimeMessage = tmp.ContainsKey("overtime") ? $"{tmp["overtime"].Count}天\n{string.Join("\n", tmp["overtime"])}" : "";
 
-                    #region 加班
-                    if (item.employee.infos.overtime > 0)
-                    {
-                        string m = $"{item.dateStr} ({item.employee.infos.overtime})";
-                        if (tmp.ContainsKey("overtime"))
-                        {
-                            tmp["overtime"].Add(m);
-                        }
-                        else
-                        {
-                            tmp.Add("overtime", new List<string> { m });
-                        }
-                    }
-                    #endregion
+                    return Result;
                 }
-                Result.presenceMessage = tmp.ContainsKey("presence") ? $"{tmp["presence"].Count}天異常\n{string.Join("\n", tmp["presence"])}" : "";
-                Result.absenceMessage = tmp.ContainsKey("absence") ? $"{tmp["absence"].Count}天\n{string.Join("\n", tmp["absence"])}" : "";
-                Result.overtimeMessage = tmp.ContainsKey("overtime") ? $"{tmp["overtime"].Count}天\n{string.Join("\n", tmp["overtime"])}" : "";
-
-                return Result;
-            } 
+                else
+                {
+                    throw new Exception($"彙整結果發生問題。原因：員工出勤紀錄為空");
+                }
+            }
             #endregion
-        } 
+        }
         #endregion
     }
 
@@ -1112,7 +1062,61 @@ namespace hyperTimeSheet
             }
             return linenum;
         }
+
+        /// <summary>
+        /// 取得例外Full Stack Traces
+        /// </summary>
+        /// <param name="e"></param>
+        /// <returns></returns>
+        public static List<StackTraceModel> GetStackTraces (this Exception e)
+        {
+            List<StackTraceModel> StackTraces = new List<StackTraceModel>();
+            foreach (var item in (new StackTrace(e, true)).GetFrames())
+            {
+                int line = item.GetFileLineNumber();
+                string method = $"{item.GetMethod().Name}({string.Join(",", item.GetMethod().GetParameters().Select(x => x.ParameterType.Name))})";
+                string namespace_ = item.GetMethod().DeclaringType.FullName;
+                string fileName = item.GetFileName()?.Split('\\').LastOrDefault() ?? "";
+                //Console.WriteLine($"at {namespace_}.{method} in {fileName}:Line {line}");
+                StackTraces.Add(new StackTraceModel
+                {
+                    fileName = fileName,
+                    line = line,
+                    method = method,
+                    namespace_ = namespace_
+                });
+            }
+            return StackTraces;
+        }
+
+        /// <summary>
+        /// 取得Full Stack Traces的訊息字串
+        /// </summary>
+        /// <param name="e"></param>
+        /// <returns></returns>
+        public static string GetFullStackTracesString(this Exception e)
+        {
+            List<string> m = new List<string> { $"\"{e.Message}\"" };
+            foreach (var item in (new StackTrace(e, true)).GetFrames())
+            {
+                if (item.GetMethod().Name != "Throw" && item.GetMethod().DeclaringType.Name != "ExceptionDispatchInfo")
+                {
+                    int line = item.GetFileLineNumber();
+                    string method = $"{item.GetMethod().Name}({string.Join(",", item.GetMethod().GetParameters().Select(x => x.ParameterType.Name))})";
+                    string namespace_ = item.GetMethod().DeclaringType.FullName;
+                    string fileName = item.GetFileName()?.Split('\\').LastOrDefault() ?? "";
+                    m.Add($" at {namespace_}.{method} in {fileName}:Line {line}");
+                }
+            }
+            return string.Join("\n", m);
+        }
+
+        public class StackTraceModel
+        {
+            public string method;
+            public string namespace_;
+            public string fileName;
+            public int line = 0;
+        }
     }
-
-
 }

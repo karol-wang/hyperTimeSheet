@@ -17,16 +17,20 @@ namespace hyperTimeSheet
     /// </summary>
     class presenceModel:pathCheck
     {
-        public List<exceptionCaseModel> exceptionCases;
+        public static List<exceptionCaseModel> ExceptionCases { get; set; }
         public presenceModel(int month)
         {
-            this.FileExts = ConfigurationManager.AppSettings["presenceFileExts"].Split(',').ToList();
-            this.FileFormats = ConfigurationManager.AppSettings["presenceFileFormats"].Split(',').ToList();
-            this.FileRegex = ConfigurationManager.AppSettings["presenceFileRegex"];
+            FileExts = ConfigurationManager.AppSettings["presenceFileExts"].Split(',').ToList();
+            FileFormats = ConfigurationManager.AppSettings["presenceFileFormats"].Split(',').ToList();
+            FileRegex = ConfigurationManager.AppSettings["presenceFileRegex"];
             string presenceFilePath = ConfigurationManager.AppSettings["presenceFilePath"] == "" ? $@"{System.Environment.CurrentDirectory}\files\" : ConfigurationManager.AppSettings["presenceFilePath"];
-            this.path = presenceFilePath.EndsWith(@"\") ? presenceFilePath : $@"{presenceFilePath}\";
-            check(this.path);
-            this.month = month;
+            Path = presenceFilePath.EndsWith(@"\") ? presenceFilePath : $@"{presenceFilePath}\";
+            Check(Path);
+            Month = month;
+            string dtime = ConfigurationManager.AppSettings["defaultClockInTime"];
+            DefaultClockInTime = default(DateTime).Add(DateTime.Parse(dtime).TimeOfDay);
+            Employees = new List<Employee>();
+
             List<DateInfo> tmp = new List<DateInfo>();
 
             #region 讀取範本->取當月日期資訊
@@ -63,13 +67,13 @@ namespace hyperTimeSheet
                         // 9 -> white
                         // 假日底色代碼：11 -> light green
 
-                        tmp.Add(new DateInfo() { date = date, week = week, note = note, workingDay = workingDay});
+                        tmp.Add(new DateInfo() { Date = date, Week = week, Note = note, WorkingDay = workingDay});
                     }
                 }
             }
             #endregion
 
-            Dates = tmp;
+            DateInfos = tmp;
         }
 
         /// <summary>
@@ -90,66 +94,85 @@ namespace hyperTimeSheet
         /// <summary>
         /// 資料夾路徑
         /// </summary>
-        public string path { get; set; }
+        public string Path { get; set; }
 
         /// <summary>
         /// 月份
         /// </summary>
-        public int month { get; set; }
+        public int Month { get; set; }
 
         /// <summary>
-        /// 每日資訊
+        /// 預設上班時間
         /// </summary>
-        public List<DateInfo> Dates { get; set; }
+        public static DateTime DefaultClockInTime { get; set; }
 
         /// <summary>
-        /// 日期資訊：幾月幾號、週幾、是否為工作天，當天的員工資訊
+        /// 員工出勤紀錄
+        /// </summary>
+        public List<Employee> Employees { get; set; }
+
+        public static List<DateInfo> DateInfos { get; set; }
+
+        /// <summary>
+        /// 日期資訊：幾月幾號、週幾、是否為工作天，當天上下班資訊
         /// </summary>
         public class DateInfo
         {
             /// <summary>
             /// 日期
             /// </summary>
-            public DateTime date { get; set; }
+            public DateTime Date { get; set; }
 
             /// <summary>
             /// 是否為上班日
             /// </summary>
-            public bool workingDay { get; set; }
+            public bool WorkingDay { get; set; }
 
-            public string note { get; set; }
+            public string Note { get; set; }
             
             /// <summary>
             /// 星期
             /// </summary>
-            public string week { get; set; }
-
-            public List<employee> employees = new List<employee>();
+            public string Week { get; set; }
 
             /// <summary>
-            /// 取得當天請假員工列表，若當天無員工請假，則為null
+            /// 當天上下班資訊
             /// </summary>
-            /// <param name="absence"></param>
-            /// <returns></returns>
-            public List<absenceModel.employee> GetAbsenceEmploees(absenceModel absence)
-            {
-                var absenceDate = absence.Dates.SingleOrDefault(x => x.date == date);
-                return absenceDate == null ? null : absenceDate.employees;
-            }
+            public Info Infos = new Info();
+
+
+            ///// <summary>
+            ///// 取得當天請假員工列表，若當天無員工請假，則為null
+            ///// </summary>
+            ///// <param name="absence"></param>
+            ///// <returns></returns>
+            //public List<absenceModel.Employee> GetAbsenceEmploees(absenceModel absence)
+            //{
+            //    var absenceDate = absence.Dates.SingleOrDefault(x => x.date == Date);
+            //    return absenceDate == null ? null : absenceDate.employees;
+            //}
         }
 
-        public class employee
+        public class Employee
         {
             private string no;
+
+            public Employee(string No)
+            {
+                var e = ExceptionCases?.SingleOrDefault(x => x.No == No);
+                SpecifiedClockInTime = e?.SpecifiedClockIn ?? default;
+                Dates = new List<DateInfo>();
+            }
+
             /// <summary>
             /// 姓名
             /// </summary>
-            public string name { get; set; }
+            public string Name { get; set; }
 
             /// <summary>
             /// 英文名
             /// </summary>
-            public string ename { get; set; }
+            public string Ename { get; set; }
 
             /// <summary>
             /// 4位數員編,ex:0001
@@ -164,27 +187,26 @@ namespace hyperTimeSheet
             }
 
             /// <summary>
-            /// 各天上下班資訊
+            /// 指定上班時間
             /// </summary>
-            public info infos = new info();
+            public DateTime SpecifiedClockInTime { get; set; }
+
+            /// <summary>
+            /// 每日資訊
+            /// </summary>
+            public List<DateInfo> Dates { get; set; }
 
             /// <summary>
             /// 檢查上班時間
             /// </summary>
-            /// <param name="exceptionCases"></param>
+            /// <param name="ClockInTime"></param>
             /// <returns></returns>
-            public bool CheckClockInTime(List<exceptionCaseModel> exceptionCases)
+            public bool CheckClockInTime(DateInfo dateInfo)
             {
-                bool inTime = false;
-                string dtime = ConfigurationManager.AppSettings["defaultClockInTime"];
-                DateTime defaultTime = default(DateTime).Add(DateTime.Parse(dtime).TimeOfDay);
-                if (exceptionCases != null)
-                {
-                    var ecp = exceptionCases.SingleOrDefault(x => x.No == No);
-                    DateTime time = ecp == null ? defaultTime : ecp.specifiedClockIn;
-                    inTime = infos.clockin.CompareTo(time) <= 0; //實際打卡時間小於等於設定時間 = 準時
-                }
-
+                DateTime time = SpecifiedClockInTime == default ? DefaultClockInTime : SpecifiedClockInTime;
+                //若有請假，判斷時間則延後請假之時數。ex:原9:30，請假1小時，則延後至10:30
+                time = dateInfo.Infos.AbsenceHours > 0 ? time.AddHours(dateInfo.Infos.AbsenceHours) : time;
+                bool inTime = dateInfo.Infos.Clockin.CompareTo(time) <= 0;
                 return inTime;
             }
 
@@ -192,42 +214,47 @@ namespace hyperTimeSheet
             /// 取得請假員工資訊
             /// </summary>
             /// <returns></returns>
-            public absenceModel.employee GetAbsenceEmployee(List<absenceModel.employee> aEmps){
+            public absenceModel.Employee GetAbsenceEmployee(List<absenceModel.Employee> aEmps){
                 return aEmps == null ? null : aEmps.SingleOrDefault(x => x.No == No);
             }
         }
 
-        public class info
+        public class Info
         {
             /// <summary>
             /// 上班時間
             /// </summary>
-            public DateTime clockin { get; set; }
+            public DateTime Clockin { get; set; }
 
             /// <summary>
             /// 下班時間
             /// </summary>
-            public DateTime clockout { get; set; }
+            public DateTime Clockout { get; set; }
 
             /// <summary>
             /// 上班時數
             /// </summary>
-            public double hours { get; set; }
+            public double Hours { get; set; }
 
             /// <summary>
             /// 加班時數
             /// </summary>
-            public double overtime { get; set; }
+            public double Overtime { get; set; }
 
             /// <summary>
             /// 駐點單位
             /// </summary>
-            public string onsite { get; set; }
+            public string Onsite { get; set; }
 
             /// <summary>
             /// 說明(其他)
             /// </summary>
-            public string note { get; set; }
+            public string Note { get; set; }
+
+            /// <summary>
+            /// 請假時數
+            /// </summary>
+            public double AbsenceHours { get; set; }
         }
 
         /// <summary>
@@ -237,14 +264,23 @@ namespace hyperTimeSheet
         public int GetWorkingDays()
         {
             int count = 0;
-            count = this.Dates.Where(x => x.workingDay == true).Count();
+            count = DateInfos.Where(x => x.WorkingDay == true).Count();
             return count;
         }
 
-        public List<presenceModel.employee> GetEmployees()
+        /// <summary>
+        /// 取得員工數
+        /// </summary>
+        /// <returns></returns>
+        public int GetEmployees()
         {
-            return this.Dates.FirstOrDefault(x => x.workingDay == true && x.employees.Count > 0).employees;
+            return Employees.Count;
         }
+
+        //public List<presenceModel.Employee> GetEmployees()
+        //{
+        //    return this.Dates.FirstOrDefault(x => x.workingDay == true && x.employees.Count > 0).employees;
+        //}
         
     }
 
@@ -258,7 +294,7 @@ namespace hyperTimeSheet
         {
             //以0補齊左側至4位數
             this.No = No;
-            this.specifiedClockIn = specifiedClockIn;
+            this.SpecifiedClockIn = specifiedClockIn;
         }
 
         /// <summary>
@@ -276,7 +312,7 @@ namespace hyperTimeSheet
         /// <summary>
         /// 指定上班時間
         /// </summary>
-        public DateTime specifiedClockIn { get; set; }
+        public DateTime SpecifiedClockIn { get; set; }
     }
 
     /// <summary>
@@ -290,10 +326,10 @@ namespace hyperTimeSheet
             this.FileFormats = ConfigurationManager.AppSettings["absenceFileFormats"].Split(',').ToList();
             this.FileRegex = ConfigurationManager.AppSettings["absenceFileRegex"];
             string absenceFilePath = ConfigurationManager.AppSettings["absenceFilePath"] == "" ? $@"{System.Environment.CurrentDirectory}\absenceForms\" : ConfigurationManager.AppSettings["absenceFilePath"];
-            this.path = absenceFilePath.EndsWith(@"\") ? absenceFilePath : $@"{absenceFilePath}\";
-            this.month = month;
-            check(this.path);
-            Dates = new List<DateInfo>();
+            this.Path = absenceFilePath.EndsWith(@"\") ? absenceFilePath : $@"{absenceFilePath}\";
+            this.Month = month;
+            Check(this.Path);
+            Employees = new List<Employee>();
         }
 
         /// <summary>
@@ -314,17 +350,17 @@ namespace hyperTimeSheet
         /// <summary>
         /// 資料夾路徑
         /// </summary>
-        public string path { get; set; }
+        public string Path { get; set; }
 
         /// <summary>
         /// 月份
         /// </summary>
-        public int month { get; set; }
+        public int Month { get; set; }
 
         /// <summary>
-        /// 每日資訊
+        /// 員工列表
         /// </summary>
-        public List<DateInfo> Dates { get; set; }
+        public List<Employee> Employees { get; set; }
 
         /// <summary>
         /// 日期資訊：幾月幾號，當天有假單的員工資訊
@@ -334,24 +370,27 @@ namespace hyperTimeSheet
             /// <summary>
             /// 日期
             /// </summary>
-            public DateTime date { get; set; }
+            public DateTime Date { get; set; }
 
-            public List<employee> employees = new List<employee>();
+            /// <summary>
+            /// 請假時數
+            /// </summary>
+            public double Hours { get; set; }
         }
 
-        public class employee
+        public class Employee
         {
             private string no;
 
             /// <summary>
             /// 姓名
             /// </summary>
-            public string name { get; set; }
+            public string Name { get; set; }
 
             /// <summary>
             /// 英文名
             /// </summary>
-            public string ename { get; set; }
+            public string Ename { get; set; }
 
             /// <summary>
             /// 4位數員編,ex:0001
@@ -366,9 +405,9 @@ namespace hyperTimeSheet
             }
 
             /// <summary>
-            /// 請假時數
+            /// 每日資訊
             /// </summary>
-            public double hours { get; set; }
+            public List<DateInfo> Dates = new List<DateInfo>();
         }
     }
 
@@ -383,17 +422,17 @@ namespace hyperTimeSheet
         /// <summary>
         /// 出勤
         /// </summary>
-        public string presenceMessage { get; set; }
+        public string PresenceMessage { get; set; }
 
         /// <summary>
         /// 請假
         /// </summary>
-        public string absenceMessage { get; set; }
+        public string AbsenceMessage { get; set; }
 
         /// <summary>
         /// 加班
         /// </summary>
-        public string overtimeMessage { get; set; }
+        public string OvertimeMessage { get; set; }
     }
 
     /// <summary>
@@ -401,7 +440,7 @@ namespace hyperTimeSheet
     /// </summary>
     class pathCheck
     {
-        public static void check(string path)
+        public static void Check(string path)
         {
             if (!Directory.Exists(path))
             {
